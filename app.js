@@ -5,8 +5,8 @@ import cors from 'cors';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors()); // Allow all origins, adjust for security in production
-app.use(express.json({ limit: '10mb' })); // parse JSON body, increase limit if needed
+app.use(cors()); // allow all origins becaude freedom
+app.use(express.json({ limit: '1000mb' })); // we dont care about limitz lul
 
 app.post('/proxy', async (req, res) => {
   try {
