@@ -1,0 +1,21 @@
+{
+  "name": "cors-freedom-proxy",
+  "version": "1.0.0",
+  "description": "A proxy to bypass CORS with serverside requests and forward requests with full freedom.",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "express": "^4.18.4",
+    "node-fetch": "^3.3.2",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["proxy", "cors", "express", "node", "freedom", "bypass"],
+  "author": "You",
+  "license": "MIT"
+}
