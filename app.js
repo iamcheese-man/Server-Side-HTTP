@@ -1,51 +1,46 @@
-app.get('/', (req, res) => res.send('Server is alive'));
 import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
-app.use(cors()); // allow all origins becaude freedom
-app.use(express.json({ limit: '1000mb' })); // we dont care about limitz lul
+app.use(cors());
+app.use(express.json({ limit: '1000mb' }));
 
-app.post('/proxy', async (req, res) => {
+app.get('/', (req, res) => res.send('Server is alive'));
+
+app.all('/proxy', async (req, res) => {
   try {
-    const { url, method = 'GET', headers = {}, body } = req.body;
-
+    const { url, method = req.method, headers = {}, body } = req.body || {};
     if (!url) return res.status(400).json({ error: 'Missing URL' });
 
-    // Build fetch options
     const options = {
       method: method.toUpperCase(),
-      headers,
+      headers: { ...headers }
     };
 
-    if (body && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD') {
+    if (body && !['GET', 'HEAD'].includes(options.method)) {
       options.body = typeof body === 'string' ? body : JSON.stringify(body);
-      // Add content-type if not present and body is JSON
-      if (!headers['Content-Type'] && !headers['content-type']) {
+      if (!options.headers['Content-Type'] && !options.headers['content-type']) {
         options.headers['Content-Type'] = 'application/json';
       }
     }
 
     const response = await fetch(url, options);
 
-    // Gather response headers
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    // Get response body as text
     const responseBody = await response.text();
 
-    // Send back status, headers and body
     res.json({
       status: response.status,
       statusText: response.statusText,
       headers: responseHeaders,
-      body: responseBody,
+      body: responseBody
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
