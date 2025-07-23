@@ -6,31 +6,42 @@ import dns from 'dns/promises';
 const app = express();
 const PORT = process.env.PORT || 54839;
 
-// CORS freedom
+// Capture raw body middleware
+app.use((req, res, next) => {
+  const chunks = [];
+  req.on('data', chunk => chunks.push(chunk));
+  req.on('end', () => {
+    req.rawBody = Buffer.concat(chunks);
+    next();
+  });
+});
+
+// CORS setup
 app.use(cors({
   origin: '*',
-  methods: '*',
-  allowedHeaders: '*',
-  credentials: false
+  credentials: false,
+  methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS','HEAD'],
+  allowedHeaders: (req, callback) => {
+    const reqHeaders = req.headers['access-control-request-headers'];
+    callback(null, reqHeaders ? reqHeaders.split(',').map(h => h.trim()) : ['Content-Type', 'Authorization']);
+  }
 }));
 
 app.use(express.json({ limit: '1000mb' }));
-app.use(express.raw({ limit: '1000mb', type: '*/*' }));
-app.use(express.text({ limit: '1000mb', type: 'text/*' }));
 app.use(express.urlencoded({ extended: true, limit: '1000mb' }));
+app.use(express.text({ type: 'text/*', limit: '1000mb' }));
+app.use(express.raw({ type: '*/*', limit: '1000mb' }));
 
-// Preflight handler
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', '*');
-  res.header('Access-Control-Allow-Headers', '*');
+  res.header('Access-Control-Allow-Methods', req.headers['access-control-request-method'] || '*');
+  res.header('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
   res.header('Access-Control-Max-Age', '86400');
   res.sendStatus(200);
 });
 
 app.get('/', (req, res) => res.send('Server is alive'));
 
-// Check for private IPs
 function isPrivateIp(ip) {
   const privateRanges = [
     /^127\./,
@@ -54,7 +65,6 @@ app.all('/proxy', async (req, res) => {
 
     if (!url) return res.status(400).json({ error: 'URL required' });
 
-    // --- Prevent recursive proxying (loop protection) ---
     if (req.headers['x-proxy-hop']) {
       return res.status(400).json({ error: 'Recursive proxy call detected and blocked' });
     }
@@ -66,7 +76,6 @@ app.all('/proxy', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL' });
     }
 
-    // --- Prevent proxy calling itself via domain or localhost ---
     const parsedUrl = new URL(url);
     const isSelfDomain =
       parsedUrl.hostname === req.hostname ||
@@ -74,12 +83,10 @@ app.all('/proxy', async (req, res) => {
       parsedUrl.hostname === '127.0.0.1' ||
       parsedUrl.hostname === '::1';
 
-    const isSelfProxyCall = isSelfDomain && parsedUrl.pathname === '/proxy';
-    if (isSelfProxyCall) {
+    if (isSelfDomain && parsedUrl.pathname === '/proxy') {
       return res.status(403).json({ error: 'Request to proxy endpoint from itself is forbidden' });
     }
 
-    // DNS resolution
     let addresses;
     try {
       addresses = await dns.lookup(hostname, { all: true });
@@ -91,18 +98,13 @@ app.all('/proxy', async (req, res) => {
       return res.status(403).json({ error: 'Access to localhost or private IP ranges is forbidden' });
     }
 
-    // Forward headers
+    // Prepare headers
     const forwardHeaders = { ...customHeaders };
-
     Object.keys(req.headers).forEach(key => {
       if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
-        if (!forwardHeaders[key]) {
-          forwardHeaders[key] = req.headers[key];
-        }
+        if (!forwardHeaders[key]) forwardHeaders[key] = req.headers[key];
       }
     });
-
-    // Inject loop protection header
     forwardHeaders['X-Proxy-Hop'] = '1';
 
     const options = {
@@ -113,9 +115,7 @@ app.all('/proxy', async (req, res) => {
     if (body && !['GET', 'HEAD', 'OPTIONS'].includes(options.method)) {
       if (typeof body === 'object' && body !== null) {
         options.body = JSON.stringify(body);
-        if (!options.headers['Content-Type']) {
-          options.headers['Content-Type'] = 'application/json';
-        }
+        if (!options.headers['Content-Type']) options.headers['Content-Type'] = 'application/json';
       } else {
         options.body = body;
       }
@@ -123,35 +123,48 @@ app.all('/proxy', async (req, res) => {
       options.body = req.rawBody;
     }
 
-    const response = await fetch(url, options);
+    // Abort controller + timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    options.signal = controller.signal;
 
-    // Capture response headers
+    let response;
+    try {
+      response = await fetch(url, options);
+      clearTimeout(timeoutId);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        return res.status(504).json({ error: 'Fetch request timed out' });
+      }
+      throw err;
+    }
+
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    // Set CORS headers
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', req.headers['access-control-request-method'] || '*');
+    res.header('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
+    res.header('Access-Control-Expose-Headers', '*');
+
+    Object.keys(responseHeaders).forEach(key => {
+      if (!['transfer-encoding', 'connection', 'content-encoding'].includes(key.toLowerCase())) {
+        res.header(key, responseHeaders[key]);
+      }
+    });
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    res.status(response.status).send(buffer);
+
+  } catch (error) {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', '*');
     res.header('Access-Control-Allow-Headers', '*');
     res.header('Access-Control-Expose-Headers', '*');
-
-    // Forward response headers except problematic ones
-    Object.keys(responseHeaders).forEach(key => {
-      if (!['transfer-encoding', 'connection'].includes(key.toLowerCase())) {
-        res.setHeader(key, responseHeaders[key]);
-      }
-    });
-
-    // Stream binary content properly
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    res.status(response.status);
-    res.send(buffer);
-
-  } catch (error) {
     res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
