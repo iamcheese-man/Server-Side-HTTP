@@ -125,33 +125,31 @@ app.all('/proxy', async (req, res) => {
 
     const response = await fetch(url, options);
 
+    // Capture response headers
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    const buffer = await response.arrayBuffer();
-    const responseBody = Buffer.from(buffer);
-
+    // Set CORS headers
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', '*');
     res.header('Access-Control-Allow-Headers', '*');
     res.header('Access-Control-Expose-Headers', '*');
 
+    // Forward response headers except problematic ones
     Object.keys(responseHeaders).forEach(key => {
-      if (!['transfer-encoding', 'connection', 'content-encoding'].includes(key.toLowerCase())) {
-        res.header(key, responseHeaders[key]);
+      if (!['transfer-encoding', 'connection'].includes(key.toLowerCase())) {
+        res.setHeader(key, responseHeaders[key]);
       }
     });
 
-    res.status(response.status).json({
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders,
-      body: responseBody.toString(),
-      url: url,
-      method: method.toUpperCase()
-    });
+    // Stream binary content properly
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    res.status(response.status);
+    res.send(buffer);
 
   } catch (error) {
     res.status(500).json({ error: error.message, stack: error.stack });
