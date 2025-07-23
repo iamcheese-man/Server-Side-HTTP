@@ -34,7 +34,7 @@ app.get('/', (req, res) => res.send('Server is alive'));
 function isPrivateIp(ip) {
   // IPv4 ranges
   const privateRanges = [
-    /^127\./,                 // Loopback IPv4
+    /^127\./,                 // Loopback IPv4 (localhost)
     /^10\./,                  // Private A
     /^172\.(1[6-9]|2[0-9]|3[0-1])\./,  // Private B
     /^192\.168\./             // Private C
