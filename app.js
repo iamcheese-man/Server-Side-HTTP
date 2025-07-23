@@ -1,12 +1,12 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
-import dns from 'dns/promises';  // Using promises-based dns module
+import dns from 'dns/promises';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Complete CORS freedom
+// CORS freedom
 app.use(cors({
   origin: '*',
   methods: '*',
@@ -19,7 +19,7 @@ app.use(express.raw({ limit: '1000mb', type: '*/*' }));
 app.use(express.text({ limit: '1000mb', type: 'text/*' }));
 app.use(express.urlencoded({ extended: true, limit: '1000mb' }));
 
-// Handle ALL preflight requests
+// Preflight handler
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', '*');
@@ -30,39 +30,35 @@ app.options('*', (req, res) => {
 
 app.get('/', (req, res) => res.send('Server is alive'));
 
-// Helper: Check if IP is localhost or private
+// Check for private IPs
 function isPrivateIp(ip) {
-  // IPv4 ranges
   const privateRanges = [
-    /^127\./,                 // Loopback IPv4 (localhost)
-    /^10\./,                  // Private A
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./,  // Private B
-    /^192\.168\./             // Private C
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
+    /^192\.168\./
   ];
-
-  // IPv6 localhost and unique local addresses
   const privateIPv6Ranges = [
-    /^::1$/,                  // IPv6 localhost
-    /^fc00:/i                 // IPv6 unique local address
+    /^::1$/,
+    /^fc00:/i
   ];
-
   return privateRanges.some(r => r.test(ip)) || privateIPv6Ranges.some(r => r.test(ip));
 }
 
-// Support ALL HTTP methods - complete freedom with added security
 app.all('/proxy', async (req, res) => {
   try {
-    // Get URL from anywhere
     const url = req.body?.url || req.query.url || req.headers['x-target-url'];
     const method = req.body?.method || req.query.method || req.headers['x-target-method'] || req.method;
     const customHeaders = req.body?.headers || req.query.headers || {};
     let body = req.body?.body || req.query.body;
 
-    if (!url) {
-      return res.status(400).json({ error: 'URL required' });
+    if (!url) return res.status(400).json({ error: 'URL required' });
+
+    // --- Prevent recursive proxying (loop protection) ---
+    if (req.headers['x-proxy-hop']) {
+      return res.status(400).json({ error: 'Recursive proxy call detected and blocked' });
     }
 
-    // Parse hostname from URL to check for private IPs
     let hostname;
     try {
       hostname = new URL(url).hostname;
@@ -70,7 +66,20 @@ app.all('/proxy', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL' });
     }
 
-    // DNS lookup to get IPs
+    // --- Prevent proxy calling itself via domain or localhost ---
+    const parsedUrl = new URL(url);
+    const isSelfDomain =
+      parsedUrl.hostname === req.hostname ||
+      parsedUrl.hostname === 'localhost' ||
+      parsedUrl.hostname === '127.0.0.1' ||
+      parsedUrl.hostname === '::1';
+
+    const isSelfProxyCall = isSelfDomain && parsedUrl.pathname === '/proxy';
+    if (isSelfProxyCall) {
+      return res.status(403).json({ error: 'Request to proxy endpoint from itself is forbidden' });
+    }
+
+    // DNS resolution
     let addresses;
     try {
       addresses = await dns.lookup(hostname, { all: true });
@@ -78,15 +87,13 @@ app.all('/proxy', async (req, res) => {
       return res.status(400).json({ error: 'DNS lookup failed', details: dnsErr.message });
     }
 
-    // Check all resolved IPs against private ranges
     if (addresses.some(addr => isPrivateIp(addr.address))) {
       return res.status(403).json({ error: 'Access to localhost or private IP ranges is forbidden' });
     }
 
-    // Prepare headers - forward everything except problematic ones
+    // Forward headers
     const forwardHeaders = { ...customHeaders };
-    
-    // Copy original request headers if needed
+
     Object.keys(req.headers).forEach(key => {
       if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
         if (!forwardHeaders[key]) {
@@ -95,12 +102,14 @@ app.all('/proxy', async (req, res) => {
       }
     });
 
+    // Inject loop protection header
+    forwardHeaders['X-Proxy-Hop'] = '1';
+
     const options = {
       method: method.toUpperCase(),
       headers: forwardHeaders
     };
 
-    // Handle body for methods that support it
     if (body && !['GET', 'HEAD', 'OPTIONS'].includes(options.method)) {
       if (typeof body === 'object' && body !== null) {
         options.body = JSON.stringify(body);
@@ -114,33 +123,27 @@ app.all('/proxy', async (req, res) => {
       options.body = req.rawBody;
     }
 
-    // Make the request with complete freedom
     const response = await fetch(url, options);
 
-    // Capture ALL response headers
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    // Get response body as buffer
     const buffer = await response.arrayBuffer();
     const responseBody = Buffer.from(buffer);
 
-    // Set permissive CORS headers
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', '*');
     res.header('Access-Control-Allow-Headers', '*');
     res.header('Access-Control-Expose-Headers', '*');
 
-    // Forward response headers from target (except problematic ones)
     Object.keys(responseHeaders).forEach(key => {
       if (!['transfer-encoding', 'connection', 'content-encoding'].includes(key.toLowerCase())) {
         res.header(key, responseHeaders[key]);
       }
     });
 
-    // Return response with complete data
     res.status(response.status).json({
       status: response.status,
       statusText: response.statusText,
@@ -151,16 +154,12 @@ app.all('/proxy', async (req, res) => {
     });
 
   } catch (error) {
-    res.status(500).json({ 
-      error: error.message,
-      stack: error.stack
-    });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
-// Catch-all route for maximum flexibility
 app.use('*', (req, res) => {
-  res.status(404).json({ 
+  res.status(404).json({
     error: 'Endpoint not found',
     hint: 'Use /proxy with url parameter'
   });
