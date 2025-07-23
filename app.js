@@ -1,11 +1,12 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
+import { URL } from 'url';
+import dns from 'dns/promises';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Complete CORS freedom
 app.use(cors({
   origin: '*',
   methods: '*',
@@ -18,7 +19,6 @@ app.use(express.raw({ limit: '1000mb', type: '*/*' }));
 app.use(express.text({ limit: '1000mb', type: 'text/*' }));
 app.use(express.urlencoded({ extended: true, limit: '1000mb' }));
 
-// Handle ALL preflight requests
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', '*');
@@ -29,10 +29,20 @@ app.options('*', (req, res) => {
 
 app.get('/', (req, res) => res.send('Server is alive'));
 
-// Support ALL HTTP methods - complete freedom
+// 🔐 Security: Block localhost/private IP targets
+function isPrivateAddress(ip) {
+  return (
+    ip.startsWith('127.') ||
+    ip === '::1' ||
+    ip === 'localhost' ||
+    ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)
+  );
+}
+
 app.all('/proxy', async (req, res) => {
   try {
-    // Get URL from anywhere
     const url = req.body?.url || req.query.url || req.headers['x-target-url'];
     const method = req.body?.method || req.query.method || req.headers['x-target-method'] || req.method;
     const customHeaders = req.body?.headers || req.query.headers || {};
@@ -42,10 +52,18 @@ app.all('/proxy', async (req, res) => {
       return res.status(400).json({ error: 'URL required' });
     }
 
-    // Prepare headers - forward everything except problematic ones
+    // 🛡️ Block localhost/private IPs
+    const parsedUrl = new URL(url);
+    const hostname = parsedUrl.hostname;
+
+    const addresses = await dns.lookup(hostname, { all: true });
+    for (const addr of addresses) {
+      if (isPrivateAddress(addr.address)) {
+        return res.status(403).json({ error: 'Access to private or local IPs is blocked.' });
+      }
+    }
+
     const forwardHeaders = { ...customHeaders };
-    
-    // Copy original request headers if needed
     Object.keys(req.headers).forEach(key => {
       if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
         if (!forwardHeaders[key]) {
@@ -59,7 +77,6 @@ app.all('/proxy', async (req, res) => {
       headers: forwardHeaders
     };
 
-    // Handle body for methods that support it
     if (body && !['GET', 'HEAD', 'OPTIONS'].includes(options.method)) {
       if (typeof body === 'object' && body !== null) {
         options.body = JSON.stringify(body);
@@ -73,33 +90,26 @@ app.all('/proxy', async (req, res) => {
       options.body = req.rawBody;
     }
 
-    // Make the request with complete freedom
     const response = await fetch(url, options);
-
-    // Capture ALL response headers
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    // Get response body
     const buffer = await response.arrayBuffer();
     const responseBody = Buffer.from(buffer);
 
-    // Set permissive CORS headers
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', '*');
     res.header('Access-Control-Allow-Headers', '*');
     res.header('Access-Control-Expose-Headers', '*');
 
-    // Forward response headers from target
     Object.keys(responseHeaders).forEach(key => {
       if (!['transfer-encoding', 'connection', 'content-encoding'].includes(key.toLowerCase())) {
         res.header(key, responseHeaders[key]);
       }
     });
 
-    // Return response with complete data
     res.status(response.status).json({
       status: response.status,
       statusText: response.statusText,
@@ -117,7 +127,6 @@ app.all('/proxy', async (req, res) => {
   }
 });
 
-// Catch-all route for maximum flexibility
 app.use('*', (req, res) => {
   res.status(404).json({ 
     error: 'Endpoint not found',
@@ -127,5 +136,4 @@ app.use('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`CORS Freedom Proxy running on port ${PORT}`);
-  console.log('All HTTP methods supported - complete freedom!');
 });
