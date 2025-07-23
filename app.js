@@ -4,7 +4,7 @@ import cors from 'cors';
 import dns from 'dns/promises';
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 54839;
 
 // CORS freedom
 app.use(cors({
