@@ -1,6 +1,3 @@
-Ive got this script
-Change the console.log at the end to be the 2 original console.log functions
-
 import express from 'express';
 import os from 'os';
 import dns from 'dns/promises';
