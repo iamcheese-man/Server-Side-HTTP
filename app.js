@@ -2,6 +2,7 @@ import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
 import dns from 'dns/promises';
+import os from 'os';
 
 const app = express();
 const PORT = process.env.PORT || 54839;
@@ -42,6 +43,13 @@ app.options('*', (req, res) => {
 
 app.get('/', (req, res) => res.send('Server is alive'));
 
+const localIps = Object.values(os.networkInterfaces())
+  .flat()
+  .filter(Boolean)
+  .map(i => i.address);
+
+const forbiddenPorts = [22, 2375, 3306, 6379, 5000, 8000];
+
 function isPrivateIp(ip) {
   const privateRanges = [
     /^127\./,
@@ -51,7 +59,8 @@ function isPrivateIp(ip) {
   ];
   const privateIPv6Ranges = [
     /^::1$/,
-    /^fc00:/i
+    /^fc00:/i,
+    /^fd00:/i
   ];
   return privateRanges.some(r => r.test(ip)) || privateIPv6Ranges.some(r => r.test(ip));
 }
@@ -69,36 +78,40 @@ app.all('/proxy', async (req, res) => {
       return res.status(400).json({ error: 'Recursive proxy call detected and blocked' });
     }
 
-    let hostname;
+    let parsedUrl;
     try {
-      hostname = new URL(url).hostname;
+      parsedUrl = new URL(url);
     } catch {
       return res.status(400).json({ error: 'Invalid URL' });
     }
 
-    const parsedUrl = new URL(url);
-    const isSelfDomain =
-      parsedUrl.hostname === req.hostname ||
-      parsedUrl.hostname === 'localhost' ||
-      parsedUrl.hostname === '127.0.0.1' ||
-      parsedUrl.hostname === '::1';
+    // ✅ Block sensitive/dangerous protocols
+    const forbiddenProtocols = ['file:', 'data:', 'javascript:', 'about:', 'ftp:', 'ws:', 'wss:'];
+    if (forbiddenProtocols.includes(parsedUrl.protocol)) {
+      return res.status(403).json({ error: `${parsedUrl.protocol} protocol is forbidden` });
+    }
 
-    if (isSelfDomain && parsedUrl.pathname === '/proxy') {
-      return res.status(403).json({ error: 'Request to proxy endpoint from itself is forbidden' });
+    // ✅ Block sensitive ports
+    const port = parsedUrl.port ? parseInt(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80);
+    if (forbiddenPorts.includes(port)) {
+      return res.status(403).json({ error: `Access to port ${port} is forbidden` });
     }
 
     let addresses;
     try {
-      addresses = await dns.lookup(hostname, { all: true });
+      addresses = await dns.lookup(parsedUrl.hostname, { all: true });
     } catch (dnsErr) {
       return res.status(400).json({ error: 'DNS lookup failed', details: dnsErr.message });
     }
 
-    if (addresses.some(addr => isPrivateIp(addr.address))) {
-      return res.status(403).json({ error: 'Access to localhost or private IP ranges is forbidden' });
+    if (addresses.some(addr => isPrivateIp(addr.address) || localIps.includes(addr.address))) {
+      return res.status(403).json({ error: 'Access to internal or server IPs is forbidden' });
     }
 
-    // Prepare headers
+    if (parsedUrl.pathname === '/proxy') {
+      return res.status(403).json({ error: 'Request to proxy endpoint from itself is forbidden' });
+    }
+
     const forwardHeaders = { ...customHeaders };
     Object.keys(req.headers).forEach(key => {
       if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
@@ -123,7 +136,6 @@ app.all('/proxy', async (req, res) => {
       options.body = req.rawBody;
     }
 
-    // Abort controller + timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     options.signal = controller.signal;
@@ -157,7 +169,6 @@ app.all('/proxy', async (req, res) => {
     });
 
     const buffer = Buffer.from(await response.arrayBuffer());
-
     res.status(response.status).send(buffer);
 
   } catch (error) {
