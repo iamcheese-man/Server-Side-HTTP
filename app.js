@@ -188,6 +188,6 @@ app.use('*', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`CORS Freedom Proxy running on port ${PORT}`);
+  console.log(`CORS Freedom Proxy running on port ${PORT}, and running on server: ${os.hostname()} (${os.platform()})`);
   console.log('All HTTP methods supported - complete freedom!');
 });
