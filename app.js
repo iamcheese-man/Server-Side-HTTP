@@ -1,193 +1,178 @@
+Ive got this script
+Change the console.log at the end to be the 2 original console.log functions
+
 import express from 'express';
-import fetch from 'node-fetch';
-import cors from 'cors';
-import dns from 'dns/promises';
 import os from 'os';
+import dns from 'dns/promises';
+import cors from 'cors';
+import net from 'net';
+import { parse as parseUrl } from 'url';
 
 const app = express();
-const PORT = process.env.PORT || 54839;
+const PORT = Number(process.env.PORT) || 54839;
 
-// Capture raw body middleware
-app.use((req, res, next) => {
-  const chunks = [];
-  req.on('data', chunk => chunks.push(chunk));
-  req.on('end', () => {
-    req.rawBody = Buffer.concat(chunks);
-    next();
-  });
-});
+let fetchFunc;
 
-// CORS setup
-app.use(cors({
-  origin: '*',
-  credentials: false,
-  methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS','HEAD'],
-  allowedHeaders: (req, callback) => {
-    const reqHeaders = req.headers['access-control-request-headers'];
-    callback(null, reqHeaders ? reqHeaders.split(',').map(h => h.trim()) : ['Content-Type', 'Authorization']);
+// Use global fetch if available (Node 18+), else import once
+(async () => {
+  if (typeof fetch !== 'function') {
+    fetchFunc = (await import('node-fetch')).default;
+  } else {
+    fetchFunc = fetch;
   }
-}));
+})();
 
-app.use(express.json({ limit: '1000mb' }));
-app.use(express.urlencoded({ extended: true, limit: '1000mb' }));
-app.use(express.text({ type: 'text/*', limit: '1000mb' }));
-app.use(express.raw({ type: '*/*', limit: '1000mb' }));
+// List of forbidden ports
+const FORBIDDEN_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37,
+  42, 43, 53, 77, 79, 87, 95, 101, 102, 103, 104, 109,
+  110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143,
+  179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+  532, 540, 556, 563, 587, 601, 636, 993, 995, 2049, 3659,
+  4045, 6000, 6665, 6666, 6667, 6668, 6669
+]);
 
-app.options('*', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', req.headers['access-control-request-method'] || '*');
-  res.header('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
-  res.header('Access-Control-Max-Age', '86400');
-  res.sendStatus(200);
-});
+const normalizeHostname = (hostname) => (hostname || '').toLowerCase();
 
-app.get('/', (req, res) => res.send('Server is alive'));
+function getLocalIps() {
+  const interfaces = os.networkInterfaces();
+  const localIps = [];
+  for (const name in interfaces) {
+    for (const iface of interfaces[name]) {
+      if (iface && !iface.internal && iface.address) {
+        localIps.push(iface.address);
+      }
+    }
+  }
+  return localIps;
+}
 
-const localIps = Object.values(os.networkInterfaces())
-  .flat()
-  .filter(Boolean)
-  .map(i => i.address);
+async function isRequestToSelf(parsedUrl, serverPort) {
+  const hostname = normalizeHostname(parsedUrl.hostname);
 
-const forbiddenPorts = [22, 2375, 3306, 6379, 5000, 8000];
+  if (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1'
+  ) {
+    const portNum = parsedUrl.port
+      ? Number(parsedUrl.port)
+      : (parsedUrl.protocol === 'https:' ? 443 : 80);
+    return portNum === serverPort;
+  }
+
+  const localIps = getLocalIps();
+  localIps.push('127.0.0.1', '::1');
+
+  try {
+    let resolvedIps = [];
+    try {
+      const v4 = await dns.resolve4(hostname);
+      resolvedIps.push(...v4);
+    } catch {}
+    try {
+      const v6 = await dns.resolve6(hostname);
+      resolvedIps.push(...v6);
+    } catch {}
+
+    const matchesLocalIp = resolvedIps.some(ip => localIps.includes(ip));
+    if (matchesLocalIp) {
+      const portNum = parsedUrl.port
+        ? Number(parsedUrl.port)
+        : (parsedUrl.protocol === 'https:' ? 443 : 80);
+      return portNum === serverPort;
+    }
+  } catch {
+    // DNS error ignored
+  }
+
+  return false;
+}
 
 function isPrivateIp(ip) {
-  const privateRanges = [
-    /^127\./,
-    /^10\./,
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
-    /^192\.168\./
-  ];
-  const privateIPv6Ranges = [
-    /^::1$/,
-    /^fc00:/i,
-    /^fd00:/i
-  ];
-  return privateRanges.some(r => r.test(ip)) || privateIPv6Ranges.some(r => r.test(ip));
+  return (
+    ip.startsWith('10.') ||
+    ip.startsWith('172.') ||
+    ip.startsWith('192.168.') ||
+    ip === '127.0.0.1' ||
+    ip === '::1' ||
+    ip.startsWith('169.254.') // Link-local (AWS metadata IP)
+  );
 }
+
+app.use(express.raw({ type: '*/*', limit: '1000mb' }));
+app.use(cors());
 
 app.all('/proxy', async (req, res) => {
   try {
-    const url = req.body?.url || req.query.url || req.headers['x-target-url'];
-    const method = req.body?.method || req.query.method || req.headers['x-target-method'] || req.method;
-    const customHeaders = req.body?.headers || req.query.headers || {};
-    let body = req.body?.body || req.query.body;
+    const targetUrl = req.query.url;
+    if (!targetUrl || typeof targetUrl !== 'string') {
+      return res.status(400).json({ error: 'Missing or invalid ?url=' });
+    }
 
-    if (!url) return res.status(400).json({ error: 'URL required' });
+    const parsedUrl = parseUrl(targetUrl);
+
+    // Block forbidden ports
+    const targetPort = parsedUrl.port ? Number(parsedUrl.port) : (
+      parsedUrl.protocol === 'https:' ? 443 : 80
+    );
+    if (FORBIDDEN_PORTS.has(targetPort) || targetPort === PORT) {
+      return res.status(403).json({ error: 'Port is forbidden' });
+    }
+
+    // Block direct private IPs (no DNS involved)
+    if (net.isIP(parsedUrl.hostname) && isPrivateIp(parsedUrl.hostname)) {
+      return res.status(403).json({ error: 'Direct IP to private range is forbidden' });
+    }
+
+    // Block self requests
+    if (await isRequestToSelf(parsedUrl, PORT)) {
+      return res.status(403).json({ error: 'Request to proxy server itself is forbidden' });
+    }
+
+    // Resolve and ensure all IPs are public (stop DNS rebinding)
+    try {
+      const resolved4 = await dns.resolve4(parsedUrl.hostname);
+      const resolved6 = await dns.resolve6(parsedUrl.hostname).catch(() => []);
+      const allIps = [...resolved4, ...resolved6];
+      if (allIps.some(ip => isPrivateIp(ip))) {
+        return res.status(403).json({ error: 'Resolved IP is private — blocked' });
+      }
+    } catch {
+      return res.status(403).json({ error: 'Could not resolve target host' });
+    }
 
     if (req.headers['x-proxy-hop']) {
-      return res.status(400).json({ error: 'Recursive proxy call detected and blocked' });
+      return res.status(400).json({ error: 'Proxy loop detected' });
     }
 
-    let parsedUrl;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return res.status(400).json({ error: 'Invalid URL' });
-    }
+    const headers = { ...req.headers };
+    delete headers['host'];
+    headers['x-proxy-hop'] = '1';
 
-    // ✅ Block sensitive/dangerous protocols
-    const forbiddenProtocols = ['file:', 'data:', 'javascript:', 'about:', 'ftp:', 'ws:', 'wss:'];
-    if (forbiddenProtocols.includes(parsedUrl.protocol)) {
-      return res.status(403).json({ error: `${parsedUrl.protocol} protocol is forbidden` });
-    }
-
-    // ✅ Block sensitive ports
-    const port = parsedUrl.port ? parseInt(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80);
-    if (forbiddenPorts.includes(port)) {
-      return res.status(403).json({ error: `Access to port ${port} is forbidden` });
-    }
-
-    let addresses;
-    try {
-      addresses = await dns.lookup(parsedUrl.hostname, { all: true });
-    } catch (dnsErr) {
-      return res.status(400).json({ error: 'DNS lookup failed', details: dnsErr.message });
-    }
-
-    if (addresses.some(addr => isPrivateIp(addr.address) || localIps.includes(addr.address))) {
-      return res.status(403).json({ error: 'Access to internal or server IPs is forbidden' });
-    }
-
-    if (parsedUrl.pathname === '/proxy') {
-      return res.status(403).json({ error: 'Request to proxy endpoint from itself is forbidden' });
-    }
-
-    const forwardHeaders = { ...customHeaders };
-    Object.keys(req.headers).forEach(key => {
-      if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
-        if (!forwardHeaders[key]) forwardHeaders[key] = req.headers[key];
-      }
-    });
-    forwardHeaders['X-Proxy-Hop'] = '1';
-
-    const options = {
-      method: method.toUpperCase(),
-      headers: forwardHeaders
+    const fetchOptions = {
+      method: req.method,
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15000),
+      body: ['GET', 'HEAD'].includes(req.method.toUpperCase()) ? undefined : req.body
     };
 
-    if (body && !['GET', 'HEAD', 'OPTIONS'].includes(options.method)) {
-      if (typeof body === 'object' && body !== null) {
-        options.body = JSON.stringify(body);
-        if (!options.headers['Content-Type']) options.headers['Content-Type'] = 'application/json';
-      } else {
-        options.body = body;
-      }
-    } else if (req.rawBody && !['GET', 'HEAD', 'OPTIONS'].includes(options.method)) {
-      options.body = req.rawBody;
-    }
+    const fetchResponse = await fetchFunc(targetUrl, fetchOptions);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
-    options.signal = controller.signal;
-
-    let response;
-    try {
-      response = await fetch(url, options);
-      clearTimeout(timeoutId);
-    } catch (err) {
-      clearTimeout(timeoutId);
-      if (err.name === 'AbortError') {
-        return res.status(504).json({ error: 'Fetch request timed out' });
-      }
-      throw err;
-    }
-
-    const responseHeaders = {};
-    response.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
+    fetchResponse.headers.forEach((value, key) => {
+      res.setHeader(key, value);
     });
+    res.setHeader('access-control-allow-origin', '*');
 
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', req.headers['access-control-request-method'] || '*');
-    res.header('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
-    res.header('Access-Control-Expose-Headers', '*');
-
-    Object.keys(responseHeaders).forEach(key => {
-      if (!['transfer-encoding', 'connection', 'content-encoding'].includes(key.toLowerCase())) {
-        res.header(key, responseHeaders[key]);
-      }
-    });
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.status(response.status).send(buffer);
-
-  } catch (error) {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', '*');
-    res.header('Access-Control-Allow-Headers', '*');
-    res.header('Access-Control-Expose-Headers', '*');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    res.status(fetchResponse.status);
+    fetchResponse.body.pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: 'Proxy error', details: err.message });
   }
 });
 
-app.use('*', (req, res) => {
-  res.status(404).json({
-    error: 'Endpoint not found',
-    hint: 'Use /proxy with url parameter'
-  });
-});
-
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(`CORS Freedom Proxy running on port ${PORT}, and running on server: ${os.hostname()} (${os.platform()})`);
   console.log('All HTTP methods supported - complete freedom!');
 });
