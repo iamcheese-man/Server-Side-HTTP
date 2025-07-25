@@ -1,12 +1,11 @@
 // This version is PURELY designed for private use. If exposed publicly, hackers can abuse the proxy.
 const http = require('http');
 const net = require('net');
-const url = require('url');
 const httpProxy = require('http-proxy');
 
 const proxy = httpProxy.createProxyServer({});
 
-// Add wildcard CORS headers on proxied responses
+// Add permissive CORS headers on proxied responses
 proxy.on('proxyRes', (proxyRes, req, res) => {
   proxyRes.headers['Access-Control-Allow-Origin'] = '*';
   proxyRes.headers['Access-Control-Allow-Methods'] = '*';
@@ -14,20 +13,31 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
 });
 
 const server = http.createServer((req, res) => {
-  // Proxy all normal HTTP methods transparently
-  proxy.web(req, res, { target: req.url, changeOrigin: true }, err => {
-    res.writeHead(502);
-    res.end(`Proxy error: ${err.message}`);
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': '*',
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Max-Age': 86400,
+    });
+    return res.end();
+  }
+
+  // Accept relative URLs by prefixing with host header
+  const target = req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`;
+
+  proxy.web(req, res, { target, changeOrigin: true }, err => {
+    console.error('Proxy error:', err);
+    res.writeHead(200);
+    res.end('');
   });
 });
 
-// Handle HTTPS tunneling via CONNECT
 server.on('connect', (req, clientSocket, head) => {
-  const { hostname, port } = url.parse(`http://${req.url}`);
+  const [host, port] = req.url.split(':');
 
-  const serverSocket = net.connect(port || 443, hostname, () => {
+  const serverSocket = net.connect(port || 443, host, () => {
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-
     serverSocket.write(head);
     serverSocket.pipe(clientSocket);
     clientSocket.pipe(serverSocket);
@@ -43,7 +53,18 @@ server.on('connect', (req, clientSocket, head) => {
   });
 });
 
+// Support WebSocket proxying
+server.on('upgrade', (req, socket, head) => {
+  const target = req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`;
+  proxy.ws(req, socket, head, { target, changeOrigin: true }, err => {
+    console.error('WebSocket proxy error:', err);
+    socket.end();
+  });
+});
+
+server.timeout = 0;
+
 const PORT = 8080;
-server.listen(PORT, () => {
-  console.log(`Full protocols, full methods HTTP proxy listening on port ${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`Ultra-free local proxy listening on 127.0.0.1:${PORT}`);
 });
