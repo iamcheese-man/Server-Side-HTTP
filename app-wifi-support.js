@@ -181,6 +181,79 @@ app.all('/proxy', async (req, res) => {
     res.status(500).json({ error: 'Proxy error', details: err.message });
   }
 });
+app.on('connect', async (req, clientSocket, head) => {
+  try {
+    // Extract hostname and port from req.url, e.g. "example.com:443"
+    const [host, portStr] = req.url.split(':');
+    const port = Number(portStr) || 443;
+
+    // Basic validations:
+    if (FORBIDDEN_PORTS.has(port) || port === PORT) {
+      clientSocket.write(`HTTP/1.1 403 Forbidden\r\n\r\n`);
+      clientSocket.destroy();
+      return;
+    }
+
+    // Block direct private IPs
+    if (net.isIP(host) && isPrivateIp(host)) {
+      clientSocket.write(`HTTP/1.1 403 Forbidden\r\n\r\n`);
+      clientSocket.destroy();
+      return;
+    }
+
+    // Block localhost/self requests
+    const dummyUrl = `http://${host}:${port}`;
+    const parsedUrl = parseUrl(dummyUrl);
+
+    if (await isRequestToSelf(parsedUrl, PORT)) {
+      clientSocket.write(`HTTP/1.1 403 Forbidden\r\n\r\n`);
+      clientSocket.destroy();
+      return;
+    }
+
+    // Resolve hostname and check IPs (stop DNS rebinding)
+    let resolvedIps = [];
+    try {
+      const v4 = await dns.resolve4(host);
+      resolvedIps.push(...v4);
+    } catch {}
+    try {
+      const v6 = await dns.resolve6(host);
+      resolvedIps.push(...v6);
+    } catch {}
+
+    if (resolvedIps.length === 0 || resolvedIps.some(ip => isPrivateIp(ip))) {
+      clientSocket.write(`HTTP/1.1 403 Forbidden\r\n\r\n`);
+      clientSocket.destroy();
+      return;
+    }
+
+    // Establish TCP connection to target
+    const serverSocket = net.connect(port, host, () => {
+      // HTTP/1.1 200 Connection Established
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+      // Pipe data both ways
+      serverSocket.write(head);
+      clientSocket.pipe(serverSocket);
+      serverSocket.pipe(clientSocket);
+    });
+
+    // Error handling
+    serverSocket.on('error', () => {
+      clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+      clientSocket.destroy();
+    });
+
+    clientSocket.on('error', () => {
+      serverSocket.destroy();
+    });
+
+  } catch {
+    clientSocket.write(`HTTP/1.1 500 Internal Server Error\r\n\r\n`);
+    clientSocket.destroy();
+  }
+});
 const localIP = getLocalIP();
 app.listen(PORT, localIP, () => {
   console.log(`CORS Freedom Proxy running on port ${PORT}, and running on server: ${os.hostname()} (${os.platform()})`);
