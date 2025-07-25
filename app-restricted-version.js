@@ -1,3 +1,4 @@
+// This version is heavily restricted.
 import express from 'express';
 import os from 'os';
 import dns from 'dns/promises';
