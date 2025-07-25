@@ -5,7 +5,19 @@ import dns from 'dns/promises';
 import cors from 'cors';
 import net from 'net';
 import { parse as parseUrl } from 'url';
+import os from 'os';
 
+function getLocalIP() {
+  const nets = os.networkInterfaces();
+  for (const name in nets) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return '127.0.0.1'; // fallback
+}
 const app = express();
 const PORT = Number(process.env.PORT) || 54839;
 
@@ -169,8 +181,8 @@ app.all('/proxy', async (req, res) => {
     res.status(500).json({ error: 'Proxy error', details: err.message });
   }
 });
-
-app.listen(PORT, '0.0.0.0', () => {
+const localIP = getLocalIP();
+app.listen(PORT, localIP, () => {
   console.log(`CORS Freedom Proxy running on port ${PORT}, and running on server: ${os.hostname()} (${os.platform()})`);
   console.log('All HTTP methods supported - complete freedom!');
 });
