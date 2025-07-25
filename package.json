@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node app.js",
     "wifi": "node app-wifi-support.js"
+    "restricted": "node app-restricted-version.js"
   },
   "type": "module",
   "dependencies": {
