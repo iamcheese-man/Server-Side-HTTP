@@ -6,13 +6,15 @@
   "scripts": {
     "start": "node app.js",
     "wifi": "node app-wifi-support.js",
-    "restricted": "node app-restricted-version.js"
+    "restricted": "node app-restricted-version.js",
+    "unsecure": "node app-unsecure.js"
   },
   "type": "module",
   "dependencies": {
     "express": "^4.18.4",
     "node-fetch": "^3.3.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "http-proxy": "^1.18.1"
   },
   "engines": {
     "node": ">=18.0.0"
