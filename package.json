@@ -4,7 +4,8 @@
   "description": "A proxy to bypass CORS with serverside requests and forward requests with full freedom.",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "wifi": "node app-wifi.js"
   },
   "type": "module",
   "dependencies": {
@@ -16,6 +17,6 @@
     "node": ">=18.0.0"
   },
   "keywords": ["proxy", "cors", "express", "node", "freedom", "bypass"],
-  "author": "You",
+  "author": "iamcheese-man",
   "license": "MIT"
 }
