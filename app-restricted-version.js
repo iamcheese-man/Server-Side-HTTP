@@ -127,7 +127,7 @@ function isPrivateIp(ip) {
   );
 }
 
-app.use(express.raw({ type: '*/*', limit: '1000mb' }));
+app.use(express.raw({ type: '*/*', limit: '10mb' }));
 app.use(cors());
 
 app.all('/proxy', rateLimiter, async (req, res) => {
